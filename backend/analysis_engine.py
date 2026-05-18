@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional
 from pypdf import PdfReader
 from docx import Document
+from openpyxl import load_workbook
+
 
 @dataclass
 class AnalysisResult:
@@ -29,107 +31,196 @@ class AnalysisResult:
     confidence_level: str = "Low"
     reasoned_summary: str = ""
 
-def clean(text): return re.sub(r"\s+", " ", text or "").strip()
+
+def clean(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
 def uniq(items):
-    out=[]; seen=set()
+    out = []
+    seen = set()
     for item in items:
-        c=clean(item)
+        c = clean(item)
         if c and c not in seen:
-            out.append(c); seen.add(c)
+            out.append(c)
+            seen.add(c)
     return out
+
+
 def first(text, pattern):
-    m=re.search(pattern, text, flags=re.I|re.S)
+    m = re.search(pattern, text, flags=re.I | re.S)
     return clean(m.group(1)) if m else None
+
+
 def allm(text, pattern):
-    return uniq([m.group(1) for m in re.finditer(pattern, text, flags=re.I|re.S)])
+    return uniq([m.group(1) for m in re.finditer(pattern, text, flags=re.I | re.S)])
+
 
 def extract_text(path: Path):
-    suf=path.suffix.lower()
-    if suf in {".txt",".md",".csv",".log"}:
+    suf = path.suffix.lower()
+
+    if suf in {".txt", ".md", ".csv", ".log"}:
         return path.read_text(encoding="utf-8", errors="ignore")
-    if suf==".docx":
-        doc=Document(str(path))
+
+    if suf == ".docx":
+        doc = Document(str(path))
         return "\n".join(p.text for p in doc.paragraphs if clean(p.text))
-    if suf==".pdf":
-        reader=PdfReader(str(path))
-        return "\n".join((page.extract_text() or "") for page in reader.pages[:50])
-    raise ValueError("Unsupported file type")
+
+    if suf == ".pdf":
+        reader = PdfReader(str(path))
+        text = "\n".join((page.extract_text() or "") for page in reader.pages[:50])
+        if not clean(text):
+            raise ValueError("PDF text could not be extracted. Please upload a text-based PDF or paste the extracted text.")
+        return text
+
+    if suf == ".xlsx":
+        wb = load_workbook(filename=str(path), data_only=True)
+        chunks = []
+        for ws in wb.worksheets[:10]:
+            chunks.append(f"Sheet: {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
+                if vals:
+                    chunks.append(" | ".join(vals))
+        text = "\n".join(chunks)
+        if not clean(text):
+            raise ValueError("Spreadsheet appears empty or unreadable.")
+        return text
+
+    raise ValueError("Unsupported file type. Supported formats: PDF, DOCX, TXT, CSV, XLSX.")
+
 
 def classify(text, file_name=""):
-    c=f"{text}\n{file_name}"
-    if re.search(r"factory acceptance test plan|\bFAT\b", c, re.I): return "Factory Acceptance Test Plan"
-    if re.search(r"notification of readiness for inspection|\bNORFI\b", c, re.I): return "NORFI / Notification of Readiness for Inspection"
-    if re.search(r"notification for inspection", c, re.I): return "NOI / Notification for Inspection"
-    if re.search(r"inspection and test plan|\bITP\b", c, re.I): return "Inspection and Test Plan"
-    if re.search(r"call off|inspection assignment work order", c, re.I): return "Call Off / Inspection Assignment Work Order"
-    if re.search(r"work instruction|procedure|instruction", c, re.I): return "Work Instruction / Procedure"
+    c = f"{text}\n{file_name}"
+
+    if re.search(r"factory acceptance test plan|\bFAT\b", c, re.I):
+        return "Factory Acceptance Test Plan"
+    if re.search(r"notification of readiness for inspection|\bNORFI\b", c, re.I):
+        return "NORFI / Notification of Readiness for Inspection"
+    if re.search(r"notification for inspection|\bNOI\b", c, re.I):
+        return "NOI / Notification for Inspection"
+    if re.search(r"inspection and test plan|\bITP\b", c, re.I):
+        return "Inspection and Test Plan"
+    if re.search(r"call off|inspection assignment work order", c, re.I):
+        return "Call Off / Inspection Assignment Work Order"
+    if re.search(r"work instruction|procedure|instruction", c, re.I):
+        return "Work Instruction / Procedure"
     return "Unknown"
 
+
 def analyse_text(text, file_name=""):
-    doc_type=classify(text, file_name)
-    standards=uniq([m.group(1) for m in re.finditer(r"(IEC(?:/IEEE)?\s*[0-9-]+(?:-[0-9]+)?)", text, flags=re.I)])[:20]
-    tests=uniq([f"{m.group(1)} — {clean(m.group(2))}" for m in re.finditer(r"(?:Item\s*)?(\d+(?:\.\d+)*)\s+([^\n]{6,120})", text, flags=re.I)])[:20]
-    contacts=uniq([f"Email: {m}" for m in allm(text, r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})")] +
-                  [f"Contact person: {m}" for m in allm(text, r"Contact Person\s*:?\s*([^\n]+)")] +
-                  [f"Assigned inspector: {m}" for m in allm(text, r"Assigned Inspector\s*:?\s*([^\n]+)")])[:12]
-    result=AnalysisResult(
+    doc_type = classify(text, file_name)
+
+    standards = uniq([
+        m.group(1)
+        for m in re.finditer(r"(IEC(?:/IEEE)?\s*[0-9-]+(?:-[0-9]+)?)", text, flags=re.I)
+    ])[:20]
+
+    tests = uniq([
+        f"{m.group(1)} — {clean(m.group(2))}"
+        for m in re.finditer(r"(?:Item\s*)?(\d+(?:\.\d+)*)\s+([^\n]{6,120})", text, flags=re.I)
+    ])[:20]
+
+    # Additional extraction for NOI/ITP tables where tests are listed by ITP step.
+    itp_activity_pairs = []
+    for step in allm(text, r"\b(F\d{1,3})\b"):
+        if step not in itp_activity_pairs:
+            itp_activity_pairs.append(step)
+
+    contacts = uniq(
+        [f"Email: {m}" for m in allm(text, r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})")]
+        + [f"Contact person: {m}" for m in allm(text, r"Contact Person\s*:?\\s*([^\n]+)")]
+        + [f"Assigned inspector: {m}" for m in allm(text, r"Assigned Inspector\s*:?\s*([^\n]+)")]
+        + [f"Vendor / Subcontractor: {m}" for m in allm(text, r"Vendor\s*/\s*Sub\s*contractor Name\s*([^\n]+)")]
+    )[:12]
+
+    nature_lookup = {
+        "Factory Acceptance Test Plan": "Factory Acceptance Testing in a test-lab / workshop environment",
+        "NOI / Notification for Inspection": "Notification-based witness inspection or attendance notice",
+        "NORFI / Notification of Readiness for Inspection": "Readiness notification for inspection attendance or witness action",
+        "Inspection and Test Plan": "Inspection and Test Plan governing checkpoints, witness points, and acceptance criteria",
+        "Call Off / Inspection Assignment Work Order": "Inspection assignment / surveillance instruction",
+        "Work Instruction / Procedure": "Instruction-based inspection activity",
+        "Unknown": "Inspection activity",
+    }
+
+    result = AnalysisResult(
         document_type=doc_type,
-        project_name=first(text, r"Project Name\s*:?\s*([^\n]+)"),
-        project_reference=first(text, r"PROJECT No\.\s*([^\n]+)") or first(text, r"Customer\s*/\s*Project reference\s*:?\s*([^\n]+)"),
-        order_number=first(text, r"Order No\.?\s*:?\s*([^\n]+)"),
+        project_name=first(text, r"Project Name\s*:?\s*([^\n]+)") or first(text, r"(MERAM PROJECT)"),
+        project_reference=first(text, r"PROJECT No\.?\s*([^\n]+)") or first(text, r"Customer\s*/\s*Project reference\s*:?\s*([^\n]+)"),
+        order_number=first(text, r"Order No\.?\s*:?\s*([^\n]+)") or first(text, r"PO NO:\s*([^\n]+)"),
         notification_number=first(text, r"Notification No\.?\s*([^\n]+)"),
-        revision=first(text, r"Rev\.?\s*([A-Z0-9.-]+)"),
-        discipline=first(text, r"Discipline\s*:?\s*([^\n]+)") or ("Electrical" if re.search(r"electrical|transformer|partial.?discharge|motor", text, re.I) else None),
-        nature_of_work={{
-            "Factory Acceptance Test Plan":"Factory Acceptance Testing in a test-lab / workshop environment",
-            "NOI / Notification for Inspection":"Notification-based witness inspection or attendance notice",
-            "NORFI / Notification of Readiness for Inspection":"Readiness notification for inspection attendance or witness action",
-            "Inspection and Test Plan":"Inspection and Test Plan governing checkpoints, witness points, and acceptance criteria",
-            "Call Off / Inspection Assignment Work Order":"Inspection assignment / surveillance instruction",
-            "Work Instruction / Procedure":"Instruction-based inspection activity",
-            "Unknown":"Inspection activity"
-        }}.get(doc_type, "Inspection activity"),
-        inspection_mode="Witness" if re.search(r"\bWitness\b", text, re.I) else None,
-        inspection_stage="FAT / workshop testing" if doc_type=="Factory Acceptance Test Plan" else ("Notification / witness stage" if "Notification" in doc_type else None),
-        equipment_scope=first(text, r"Object\s*:?\s*([^\n]+)") or first(text, r"Inspection Activity\s*([^\n]+)") or first(text, r"Item description\s*:?\s*([^\n]+)"),
-        inspection_factory_location=first(text, r"Place of Witness[\s\S]*?Address\s*([^\n]+)") or first(text, r"Address\s*:?\s*([^\n]+)"),
+        revision=first(text, r"Rev\s*#?\s*:?\s*([A-Z0-9.-]+)") or first(text, r"Rev\.?\s*([A-Z0-9.-]+)"),
+        discipline=first(text, r"Discipline\s*:?\s*([^\n]+)") or ("Electrical" if re.search(r"electrical|transformer|partial.?discharge|motor|voltage|impulse", text, re.I) else None),
+        nature_of_work=nature_lookup.get(doc_type, "Inspection activity"),
+        inspection_mode="Witness" if re.search(r"\bWitness\b", text, re.I) else ("Hold" if re.search(r"\bHold\b", text, re.I) else None),
+        inspection_stage="FAT / workshop testing" if doc_type == "Factory Acceptance Test Plan" else ("Notification / witness stage" if "Notification" in doc_type else None),
+        equipment_scope=first(text, r"Object\s*:?\s*([^\n]+)") or first(text, r"Inspection Activity\s*([^\n]+)") or first(text, r"Inspection Activities\s*([^\n]+)") or first(text, r"Item description\s*:?\s*([^\n]+)") or first(text, r"PO Description\s*([^\n]+)"),
+        inspection_factory_location=first(text, r"Place of\s*Witness[\s\S]*?Address\s*([^\n]+)") or first(text, r"Manufacturer\s*&\s*Factory\s*([^\n]+)") or first(text, r"Address\s*:?\s*([^\n]+)"),
         site_of_inspection=first(text, r"Location of Work\s*:?\s*([^\n]+)") or first(text, r"Site of Inspection\s*:?\s*([^\n]+)"),
         named_contacts=contacts,
-        relevant_itp_step=first(text, r"ITP Step No\s*([^\n]+)"),
+        relevant_itp_step=", ".join(uniq(itp_activity_pairs)) if itp_activity_pairs else first(text, r"ITP Step No\s*([^\n]+)"),
         applicable_standards=standards,
         tests_or_checks=tests,
         inspector_duties=[],
         missing_information=[],
-        confidence_level="High" if len(clean(text))>500 else ("Medium" if len(clean(text))>120 else "Low"),
-        reasoned_summary=""
+        confidence_level="High" if len(clean(text)) > 500 else ("Medium" if len(clean(text)) > 120 else "Low"),
+        reasoned_summary="",
     )
-    if doc_type=="Factory Acceptance Test Plan":
-        result.inspector_duties=[
+
+    # Better test extraction for inspection notifications.
+    if not result.tests_or_checks:
+        if re.search(r"partial.?discharge", text, re.I):
+            result.tests_or_checks.append("Partial-discharge measurement")
+        if re.search(r"impulse|AC voltage", text, re.I):
+            result.tests_or_checks.append("Impulse or AC voltage test")
+        result.tests_or_checks = uniq(result.tests_or_checks)
+
+    if doc_type == "Factory Acceptance Test Plan":
+        result.inspector_duties = [
             "Review the numbered FAT test items and confirm which are routine, type, or special tests.",
             "Verify the applicable standard and acceptance criterion for each witnessed FAT item.",
-            "Record observations and any deviations during factory testing."
+            "Record observations and any deviations during factory testing.",
         ]
-        result.reasoned_summary="This document is a Factory Acceptance Test Plan organised around test items and applicable standards for factory testing."
+        result.reasoned_summary = "This document is a Factory Acceptance Test Plan organised around test items and applicable standards for factory testing."
+
     elif "Notification" in doc_type:
-        result.inspector_duties=[
+        result.inspector_duties = [
             "Confirm attendance or waiver before the inspection date.",
             "Identify the site, parties, date, witness activity, and linked ITP step.",
-            "Attend the inspection and record findings against the referenced activity."
+            "Attend the inspection and record findings against the referenced activity.",
+            "Confirm that exact acceptance criteria are taken from the referenced ITP and project quality documents.",
         ]
-        result.reasoned_summary="This document is a notification-type inspection document. Its role is to identify the site, parties, date, and witness activity before attendance."
+        result.reasoned_summary = "This document is a notification-type inspection document. Its role is to identify the site, parties, date, and witness activity before attendance."
+
+    elif doc_type == "Inspection and Test Plan":
+        result.inspector_duties = [
+            "Review each inspection and test step before the relevant stage.",
+            "Use the ITP to decide what must be checked, witnessed, recorded, and reported.",
+        ]
+        result.reasoned_summary = "This document is an Inspection and Test Plan used to govern inspection checkpoints and acceptance criteria."
+
     else:
-        result.inspector_duties=[
+        result.inspector_duties = [
             "Review the document and confirm the inspection scope.",
-            "Use the extracted fields to prepare the pre-inspection briefing."
+            "Use the extracted fields to prepare the pre-inspection briefing.",
         ]
-        result.reasoned_summary="This document has been analysed and classified to support inspection planning."
-    if not (result.project_name or result.project_reference): result.missing_information.append("Project name / reference not identified confidently.")
-    if not result.equipment_scope: result.missing_information.append("Equipment / scope not identified confidently.")
-    if not (result.inspection_factory_location or result.site_of_inspection): result.missing_information.append("Inspection location not identified confidently.")
-    if not result.tests_or_checks: result.missing_information.append("No clear test items extracted.")
-    if not result.applicable_standards: result.missing_information.append("No standards detected.")
+        result.reasoned_summary = "This document has been analysed and classified to support inspection planning."
+
+    if not (result.project_name or result.project_reference):
+        result.missing_information.append("Project name / reference not identified confidently.")
+    if not result.equipment_scope:
+        result.missing_information.append("Equipment / scope not identified confidently.")
+    if not (result.inspection_factory_location or result.site_of_inspection):
+        result.missing_information.append("Inspection location not identified confidently.")
+    if not result.tests_or_checks:
+        result.missing_information.append("No clear test items extracted.")
+    if not result.applicable_standards:
+        result.missing_information.append("No standards detected in the uploaded document. Use referenced ITP / project specifications for acceptance criteria.")
+
     return asdict(result)
 
+
 def analyse_file(path):
-    p=Path(path)
+    p = Path(path)
     return analyse_text(extract_text(p), p.name)
