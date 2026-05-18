@@ -4,12 +4,12 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from analysis_engine import analyse_file, analyse_text
 
-app = FastAPI(title="Vinqu Backend")
+app = FastAPI(title="VinQu Backend")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/")
 def root():
-    return {"status":"ok","message":"Vinqu backend is running"}
+    return {"status":"ok","message":"VinQu backend is running"}
 
 @app.get("/health")
 def health():
