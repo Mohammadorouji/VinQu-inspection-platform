@@ -15,51 +15,55 @@ Inspection Activity Partial-discharge measurement`;
 export default function Home() {
   const [text, setText] = useState("");
   const [fileName, setFileName] = useState("");
+  const [selectedFile, setSelectedFile] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [status, setStatus] = useState("Ready.");
 
-  async function onFile(e) {
+  function onFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
+    setSelectedFile(file);
     setFileName(file.name);
-    if ((file.type || "").startsWith("text/") || /\.(txt|md|csv|log)$/i.test(file.name)) {
-      setText(await file.text());
-      return;
-    }
-    const form = new FormData();
-    form.append("file", file);
-    setLoading(true);
+    setResult(null);
     setError("");
-    try {
-      const res = await fetch(process.env.NEXT_PUBLIC_BACKEND_URL + "/analyse/file", { method:"POST", body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "File analysis failed.");
-      setResult(data);
-    } catch (err) {
-      setError(err.message || "Could not analyse this file.");
-    } finally {
-      setLoading(false);
-    }
+    setStatus("File selected. Click Analyse document.");
   }
 
-  async function analyseText() {
-    if (!text.trim()) {
-      setError("Paste document text or upload a text file first.");
-      return;
-    }
+  async function analyseCurrentInput() {
     setLoading(true);
     setError("");
     try {
-      const form = new FormData();
-      form.append("text", text);
-      form.append("file_name", fileName);
-      const res = await fetch(process.env.NEXT_PUBLIC_BACKEND_URL + "/analyse/text", { method:"POST", body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Analysis failed.");
-      setResult(data);
+      if (selectedFile) {
+        setStatus("Uploading and analysing file...");
+        const form = new FormData();
+        form.append("file", selectedFile);
+        const res = await fetch(process.env.NEXT_PUBLIC_BACKEND_URL + "/analyse/file", { method:"POST", body: form });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "File analysis failed.");
+        setResult(data);
+        setStatus("File analysed successfully.");
+        return;
+      }
+
+      if (text.trim()) {
+        setStatus("Analysing pasted text...");
+        const form = new FormData();
+        form.append("text", text);
+        form.append("file_name", fileName);
+        const res = await fetch(process.env.NEXT_PUBLIC_BACKEND_URL + "/analyse/text", { method:"POST", body: form });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Text analysis failed.");
+        setResult(data);
+        setStatus("Text analysed successfully.");
+        return;
+      }
+
+      throw new Error("Choose a file or paste document text first.");
     } catch (err) {
       setError(err.message || "Analysis failed.");
+      setStatus("Analysis failed.");
     } finally {
       setLoading(false);
     }
@@ -75,22 +79,23 @@ export default function Home() {
             <p className="tag">From Evidence to Insight</p>
           </div>
         </div>
-        <p className="sub">Upload PDF, DOCX, or TXT inspection documents. Vinqu classifies the document, extracts key fields, and generates a pre-inspection briefing.</p>
+        <p className="sub">Upload PDF, DOCX, TXT, or XLSX inspection documents. Vinqu classifies the document, extracts key fields, and generates a pre-inspection briefing.</p>
       </section>
 
       <section className="grid">
         <div className="card">
           <h2>Document input</h2>
           <label>Upload file</label>
-          <input type="file" onChange={onFile} />
+          <input type="file" onChange={onFile} accept=".pdf,.docx,.txt,.md,.csv,.log,.xlsx" />
           <label>File name / reference</label>
           <input value={fileName} onChange={e => setFileName(e.target.value)} />
           <label>Document text</label>
-          <textarea value={text} onChange={e => setText(e.target.value)} />
+          <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Paste document text here if you are not uploading a file." />
           <div className="actions">
-            <button className="ghost" onClick={() => { setText(SAMPLE); setFileName("sample-noi.txt"); setResult(null); setError(""); }}>Load sample</button>
-            <button onClick={analyseText} disabled={loading}>{loading ? "Analysing..." : "Analyse document"}</button>
+            <button className="ghost" onClick={() => { setText(SAMPLE); setFileName("sample-noi.txt"); setSelectedFile(null); setResult(null); setError(""); setStatus("Sample loaded."); }}>Load sample</button>
+            <button onClick={analyseCurrentInput} disabled={loading}>{loading ? "Analysing..." : "Analyse document"}</button>
           </div>
+          <p className="status">{status}</p>
           {error ? <p className="error">{error}</p> : null}
         </div>
 
