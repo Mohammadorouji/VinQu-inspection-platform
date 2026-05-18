@@ -1,0 +1,1 @@
+# VinQu-inspection-platform
