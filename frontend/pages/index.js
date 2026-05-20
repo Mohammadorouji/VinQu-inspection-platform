@@ -144,7 +144,7 @@ export default function Home() {
     <main className="page">
       <section className="hero">
         <div className="brand">
-          <div className="logo logoMark" aria-label="VinQu logo">V</div>
+          <img src="/logo.jpeg" alt="VinQu logo" className="logo" />
           <div>
             <h1>VinQu</h1>
             <p className="tag">From Evidence to Insight</p>
