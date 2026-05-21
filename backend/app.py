@@ -1,4 +1,3 @@
-
 from pathlib import Path
 import tempfile,json
 from fastapi import FastAPI,UploadFile,File,Form,HTTPException
@@ -6,13 +5,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from docx import Document
-from analysis_engine import analyse_file,analyse_text,analyse_photo_placeholder
+from analysis_engine import analyse_file,analyse_text
+from openai_engine import analyse_photo_with_ai, assistant_chat, available as openai_available
+
 app=FastAPI(title="VinQu Backend")
 app.add_middleware(CORSMiddleware,allow_origins=["*"],allow_methods=["*"],allow_headers=["*"])
+
 @app.get("/")
-def root(): return {"status":"ok","message":"VinQu backend is running"}
+def root(): return {"status":"ok","message":"VinQu backend is running","ai_assistant_connected":openai_available()}
+
+@app.get("/ai/status")
+def ai_status(): return {"connected":openai_available()}
+
+@app.post("/ai/chat")
+async def ai_chat_endpoint(question:str=Form(...),document_context:str=Form("{}"),findings:str=Form("[]")):
+ return assistant_chat(question,document_context,findings)
+
 @app.post("/analyse/text")
 async def analyse_text_endpoint(text:str=Form(...),file_name:str=Form("")): return analyse_text(text,file_name)
+
 @app.post("/analyse/file")
 async def analyse_file_endpoint(file:UploadFile=File(...),referenced_docs:list[UploadFile]=File(default=[])):
  suffix=Path(file.filename or "").suffix
@@ -22,9 +33,12 @@ async def analyse_file_endpoint(file:UploadFile=File(...),referenced_docs:list[U
  try:
   return analyse_file(temp_path,[r.filename for r in referenced_docs if r.filename])
  except Exception as exc: raise HTTPException(status_code=400,detail=str(exc))
+
 @app.post("/analyse/photo")
 async def analyse_photo_endpoint(photo:UploadFile=File(...),inspection_area:str=Form(""),inspection_item:str=Form(""),inspector_notes:str=Form(""),document_context:str=Form("{}")):
- return analyse_photo_placeholder(photo.filename or "",inspection_area,inspection_item,inspector_notes,document_context)
+ photo_bytes=await photo.read()
+ return analyse_photo_with_ai(photo_bytes,photo.content_type or "image/jpeg",inspection_area,inspection_item,inspector_notes,document_context)
+
 @app.post("/report/docx")
 async def report_docx(payload:str=Form(...)):
  try: data=json.loads(payload)
