@@ -1,4 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "https://vinqu-backend.onrender.com";
 
 export default function Home() {
   const [fileName, setFileName] = useState("");
@@ -18,8 +20,26 @@ export default function Home() {
   const [findings, setFindings] = useState([]);
   const [currentItemIndex, setCurrentItemIndex] = useState(0);
 
+  const [aiConnected, setAiConnected] = useState(null);
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [aiAnswer, setAiAnswer] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+
   const inspectionItems = useMemo(() => result?.tests_or_checks || [], [result]);
   const currentItem = inspectionItems[currentItemIndex] || "General inspection item";
+
+  useEffect(() => {
+    async function checkAiStatus() {
+      try {
+        const res = await fetch(BACKEND_URL + "/ai/status");
+        const data = await res.json();
+        setAiConnected(Boolean(data.connected));
+      } catch (_) {
+        setAiConnected(false);
+      }
+    }
+    checkAiStatus();
+  }, []);
 
   function onInstructionFile(e) {
     const file = e.target.files?.[0];
@@ -46,7 +66,7 @@ export default function Home() {
       form.append("file", selectedFile);
       referencedDocs.forEach((file) => form.append("referenced_docs", file));
       setStatus("Uploading and analysing instruction file...");
-      const res = await fetch(process.env.NEXT_PUBLIC_BACKEND_URL + "/analyse/file", { method: "POST", body: form });
+      const res = await fetch(BACKEND_URL + "/analyse/file", { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "File analysis failed.");
       setResult(data);
@@ -80,12 +100,12 @@ export default function Home() {
       form.append("inspection_item", currentItem);
       form.append("inspector_notes", inspectorNotes);
       form.append("document_context", JSON.stringify(result || {}));
-      const res = await fetch(process.env.NEXT_PUBLIC_BACKEND_URL + "/analyse/photo", { method: "POST", body: form });
+      const res = await fetch(BACKEND_URL + "/analyse/photo", { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Photo analysis failed.");
       setPhotoAnalysis(data);
       if (!inspectorNotes) {
-        setInspectorNotes("Photo received. Automated defect classification is not active yet. Connect a vision AI model and applicable inspection standards to classify this item as Green, Yellow, or Red.");
+        setInspectorNotes(data.inspector_note_suggestion || "Photo received. Automated defect classification requires the applicable inspection standards, ITP/QCP, or project specification context.");
       }
       setStatus("Inspection photo reviewed.");
     } catch (err) {
@@ -116,13 +136,47 @@ export default function Home() {
     setStatus("Finding saved. Upload or take the next photo for the same item, or select another inspection item.");
   }
 
+  function startNewInspectionItem() {
+    setCurrentItemIndex((i) => Math.min(i + 1, Math.max(inspectionItems.length - 1, 0)));
+    setInspectionArea("");
+    setInspectionPhoto(null);
+    setPhotoPreview("");
+    setPhotoAnalysis(null);
+    setInspectorNotes("");
+    setStatus("New inspection item started.");
+  }
+
+  async function askAssistant() {
+    setAiLoading(true);
+    setError("");
+    setAiAnswer("");
+    try {
+      if (!aiQuestion.trim()) throw new Error("Write a question for VinQu AI Assistant first.");
+      const form = new FormData();
+      form.append("question", aiQuestion);
+      form.append("document_context", JSON.stringify(result || {}));
+      form.append("findings", JSON.stringify(findings || []));
+      const res = await fetch(BACKEND_URL + "/ai/chat", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "AI assistant request failed.");
+      setAiConnected(Boolean(data.connected));
+      setAiAnswer(data.answer || "No answer returned.");
+      setStatus("AI assistant answer received.");
+    } catch (err) {
+      setError(err.message || "AI assistant request failed.");
+      setStatus("AI assistant request failed.");
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   async function finishInspection() {
     setError("");
     try {
       const payload = { brand: "VinQu", generatedAt: new Date().toISOString(), instruction: result, findings };
       const form = new FormData();
       form.append("payload", JSON.stringify(payload));
-      const res = await fetch(process.env.NEXT_PUBLIC_BACKEND_URL + "/report/docx", { method: "POST", body: form });
+      const res = await fetch(BACKEND_URL + "/report/docx", { method: "POST", body: form });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.detail || "Report generation failed.");
@@ -220,7 +274,7 @@ export default function Home() {
               <button className="ghost" onClick={saveFinding}>Save Current Finding</button>
             </div>
             <div className="actions">
-              <button className="ghost" onClick={() => setCurrentItemIndex((i) => Math.min(i + 1, Math.max(inspectionItems.length - 1, 0)))}>Start New Inspection Item</button>
+              <button className="ghost" onClick={startNewInspectionItem}>Start New Inspection Item</button>
               <button onClick={finishInspection}>Finish Inspection & Generate Word Report</button>
             </div>
           </div>
@@ -239,6 +293,23 @@ export default function Home() {
             {findings.length ? findings.map((f) => <div className="finding" key={f.id}><strong>{f.result.status_label} — {f.result.suggested_finding}</strong><p>{f.inspectionItem}</p><p>{f.inspectionArea || "No area entered"}</p></div>) : <p className="muted">No saved findings yet.</p>}
           </div>
         </div>}
+      </section>
+
+      <section className="card wide">
+        <h2>4) Ask VinQu AI Assistant</h2>
+        <div className="assistantBox">
+          <div>
+            <p className="status">AI status: {aiConnected === null ? "Checking..." : aiConnected ? "Connected" : "Not connected"}</p>
+            <p className="hint">Ask about the uploaded instruction, missing information, inspection activities, photo findings, report wording, or what the inspector should verify next.</p>
+            <label>Your question</label>
+            <textarea value={aiQuestion} onChange={(e) => setAiQuestion(e.target.value)} placeholder="Example: What are the main inspector duties for this inspection?" />
+            <button onClick={askAssistant} disabled={aiLoading}>{aiLoading ? "Asking VinQu AI..." : "Ask VinQu AI Assistant"}</button>
+          </div>
+          <div>
+            <h3>Assistant answer</h3>
+            {aiAnswer ? <div className="aiAnswer">{aiAnswer}</div> : <p className="muted">No AI answer yet.</p>}
+          </div>
+        </div>
       </section>
     </main>
   );
